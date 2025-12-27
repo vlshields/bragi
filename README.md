@@ -1,4 +1,4 @@
-# Odin Launcher
+# Bragi
 
 A lightweight, fast application launcher for Linux written in Odin, inspired by rofi and dmenu.
 
