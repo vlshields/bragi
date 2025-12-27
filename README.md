@@ -6,56 +6,53 @@ A lightweight, fast application launcher for Linux written in Odin, inspired by 
 ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-## Features
+## Building
 
-- **Fast startup** — native compiled binary with minimal dependencies
-- **Fuzzy search** — intelligent matching that prioritizes word starts and consecutive characters
-- **XDG compliant** — automatically discovers applications from standard `.desktop` file locations
-- **Keyboard driven** — full keyboard navigation with vim-friendly options
-- **Minimal footprint** — single binary, no runtime dependencies beyond Raylib
-
-## Requirements
+#### Dependencies
 
 - Odin compiler (0.13+)
-- Raylib (included with Odin's vendor libraries)
 - Linux with X11 or Wayland (via XWayland)
-
-## Building
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/odin-launcher.git
-cd odin-launcher
+git clone https://github.com/vlshields/bragi.git
+cd bragi
 
 # Build release binary
-odin build . -out:launcher -o:speed
+odin build ./src -out:bragi -o:speed
 
 # Or debug build
-odin build . -out:launcher -debug
+odin build ./src  -out:bragi -debug
 ```
 
 ## Installation
 
 ```bash
 # Copy to your path
-sudo cp launcher /usr/local/bin/
+sudo cp bragi /usr/local/bin/
 
 # Or install to user directory
-cp launcher ~/.local/bin/
+cp bragi ~/.local/bin/
+
+# Or use symlinks (Recommended)
+sudo ln -s $(pwd)/bragi /usr/local/bin/bragi
 ```
+using a symlink is the prefered method because you don't have to remember to copy the binary again after
+any updates.
+
 
 ## Usage
 
 ```bash
 # Launch the application
-launcher
+bragi
 
 # Bind to a hotkey in your window manager
 # Example for i3/sway:
-# bindsym $mod+d exec launcher
+# bindsym $mod+d exec bragi
 
 # Example for Hyprland:
-# bind = $mainMod, D, exec, launcher
+# bind = $mainMod, D, exec, bragi
 ```
 
 ## Keybindings
@@ -99,7 +96,7 @@ Colors can be adjusted in the `draw` procedure.
 
 ```
 .
-├── launcher.odin    # Main source file
+├── src--odinlauncher.odin    # Main source file
 ├── README.md
 └── LICENSE
 ```
@@ -108,11 +105,8 @@ Colors can be adjusted in the `draw` procedure.
 
 - [ ] Icon support (parse `Icon=` field and load from icon themes)
 - [ ] Launch history with frecency sorting
-- [ ] Configuration file (`~/.config/launcher/config`)
-- [ ] Vim-style navigation (`Ctrl+J`/`Ctrl+K`)
-- [ ] dmenu mode (read from stdin)
-- [ ] Wayland native support
-- [ ] Theming support
+- [ ] .desktop file and icon
+
 
 ## Contributing
 
