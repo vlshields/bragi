@@ -17,23 +17,39 @@ when ODIN_OS == .Linux {
 }
 
 App_Entry :: struct {
-    name:    string,
-    exec:    string,
-    comment: string,
+    name:        string,
+    exec:        string,
+    comment:     string,
+    icon_name:   string,       // Icon name from .desktop file
+    icon_path:   string,       // Resolved absolute path to icon
+    texture:     rl.Texture2D, // Loaded texture
+    icon_loaded: bool,         // Whether load was attempted
+}
+
+Icon_Config :: struct {
+    theme_dirs:  [dynamic]string,  // Icon theme directories
+    theme_chain: [dynamic]string,  // Theme inheritance chain
 }
 
 State :: struct {
-    apps:           [dynamic]App_Entry,
-    filtered:       [dynamic]^App_Entry,
-    input:          [dynamic]u8,
-    selected:       int,
-    scroll_offset:  int,
+    apps:            [dynamic]App_Entry,
+    filtered:        [dynamic]^App_Entry,
+    input:           [dynamic]u8,
+    selected:        int,
+    scroll_offset:   int,
+    icon_config:     Icon_Config,
+    placeholder_tex: rl.Texture2D,
 }
 
 VISIBLE_ITEMS :: 10
 ITEM_HEIGHT :: 32
 WIDTH :: 600
 HEIGHT :: 400
+
+// Icon constants
+ICON_SIZE :: 24
+ICON_PADDING :: 8
+TEXT_X_OFFSET :: 40  // ICON_PADDING + ICON_SIZE + ICON_PADDING
 
 main :: proc() {
     state: State
@@ -42,13 +58,26 @@ main :: proc() {
     defer delete(state.filtered)
     defer delete(state.input)
 
+    // Initialize icon system
+    home := os.get_env("HOME")
+    append(&state.icon_config.theme_dirs, strings.concatenate({home, "/.local/share/icons"}))
+    append(&state.icon_config.theme_dirs, "/usr/share/icons")
+    append(&state.icon_config.theme_dirs, "/usr/local/share/icons")
+
+    current_theme := get_current_icon_theme()
+    defer delete(current_theme)
+    state.icon_config.theme_chain = build_theme_chain(current_theme, state.icon_config.theme_dirs[:])
+
     // Initially show all apps
     filter_apps(&state, "")
 
     rl.SetConfigFlags({.WINDOW_UNDECORATED})
     rl.InitWindow(WIDTH, HEIGHT, "Launcher")
     rl.SetTargetFPS(60)
-    
+
+    // Create placeholder icon (must be after InitWindow)
+    state.placeholder_tex = create_placeholder_icon()
+
     // Center window on screen
     monitor := rl.GetCurrentMonitor()
     mx := rl.GetMonitorWidth(monitor)
@@ -59,6 +88,26 @@ main :: proc() {
         handle_input(&state)
         draw(&state)
     }
+
+    // Cleanup icons
+    for &app in state.apps {
+        if app.texture.id != 0 && app.texture.id != state.placeholder_tex.id {
+            rl.UnloadTexture(app.texture)
+        }
+        delete(app.icon_name)
+        delete(app.icon_path)
+    }
+    rl.UnloadTexture(state.placeholder_tex)
+
+    // Cleanup icon config
+    for dir in state.icon_config.theme_dirs {
+        delete(dir)
+    }
+    delete(state.icon_config.theme_dirs)
+    for theme in state.icon_config.theme_chain {
+        delete(theme)
+    }
+    delete(state.icon_config.theme_chain)
 
     rl.CloseWindow()
 }
@@ -140,15 +189,27 @@ draw :: proc(state: ^State) {
     for i in state.scroll_offset ..< visible_end {
         app := state.filtered[i]
         y := list_y + i32(i - state.scroll_offset) * ITEM_HEIGHT
-        
+
+        // Lazy load icon
+        load_app_icon(app, &state.icon_config, state.placeholder_tex)
+
         // Highlight selected
         if i == state.selected {
             rl.DrawRectangle(10, y, WIDTH - 20, ITEM_HEIGHT - 2, {60, 60, 80, 255})
         }
-        
+
+        // Draw icon (centered vertically)
+        icon_y := y + (ITEM_HEIGHT - ICON_SIZE) / 2
+        if app.texture.id != 0 {
+            src := rl.Rectangle{0, 0, f32(app.texture.width), f32(app.texture.height)}
+            dst := rl.Rectangle{f32(10 + ICON_PADDING), f32(icon_y), ICON_SIZE, ICON_SIZE}
+            rl.DrawTexturePro(app.texture, src, dst, {0, 0}, 0, rl.WHITE)
+        }
+
+        // Draw app name (shifted right for icon)
         rl.DrawText(
             strings.clone_to_cstring(app.name),
-            20, y + 6, 18, {200, 200, 210, 255},
+            10 + TEXT_X_OFFSET, y + 6, 18, {200, 200, 210, 255},
         )
     }
 
@@ -295,6 +356,8 @@ parse_desktop_file :: proc(path: string) -> (App_Entry, bool) {
             return {}, false
         } else if strings.has_prefix(line, "Type=") && line != "Type=Application" {
             return {}, false
+        } else if strings.has_prefix(line, "Icon=") {
+            app.icon_name = strings.clone(line[5:])
         }
     }
 
@@ -316,4 +379,194 @@ launch_app :: proc(app: ^App_Entry) {
             execl("/bin/sh", "sh", "-c", cstr, nil)
         }
     }
+}
+
+// ============================================================================
+// Icon Support Functions
+// ============================================================================
+
+// Get current icon theme from GTK3 settings, fallback to hicolor
+get_current_icon_theme :: proc() -> string {
+    home := os.get_env("HOME")
+    gtk3_path := strings.concatenate({home, "/.config/gtk-3.0/settings.ini"})
+    defer delete(gtk3_path)
+
+    data, ok := os.read_entire_file(gtk3_path)
+    if !ok {
+        return strings.clone("hicolor")
+    }
+    defer delete(data)
+
+    content := string(data)
+    for line in strings.split_lines_iterator(&content) {
+        line := strings.trim_space(line)
+        if strings.has_prefix(line, "gtk-icon-theme-name=") {
+            return strings.clone(line[20:])
+        }
+    }
+
+    return strings.clone("hicolor")
+}
+
+// Parse a theme's index.theme to get inherited themes
+parse_theme_inherits :: proc(theme_name: string, base_dirs: []string) -> [dynamic]string {
+    inherits: [dynamic]string
+
+    for base_dir in base_dirs {
+        index_path := strings.concatenate({base_dir, "/", theme_name, "/index.theme"})
+        defer delete(index_path)
+
+        data, ok := os.read_entire_file(index_path)
+        if !ok do continue
+        defer delete(data)
+
+        content := string(data)
+        for line in strings.split_lines_iterator(&content) {
+            line := strings.trim_space(line)
+            if strings.has_prefix(line, "Inherits=") {
+                inherits_str := line[9:]
+                parts := strings.split(inherits_str, ",")
+                defer delete(parts)
+                for part in parts {
+                    append(&inherits, strings.clone(strings.trim_space(part)))
+                }
+                return inherits
+            }
+        }
+    }
+
+    return inherits
+}
+
+// Build the complete theme search order
+build_theme_chain :: proc(start_theme: string, base_dirs: []string) -> [dynamic]string {
+    chain: [dynamic]string
+    visited: map[string]bool
+    defer delete(visited)
+
+    queue: [dynamic]string
+    defer delete(queue)
+    append(&queue, strings.clone(start_theme))
+
+    for len(queue) > 0 {
+        theme := queue[0]
+        ordered_remove(&queue, 0)
+
+        if theme in visited {
+            delete(theme)
+            continue
+        }
+        visited[theme] = true
+        append(&chain, theme)
+
+        inherits := parse_theme_inherits(theme, base_dirs)
+        defer delete(inherits)
+        for inh in inherits {
+            if !(inh in visited) {
+                append(&queue, strings.clone(inh))
+            }
+        }
+    }
+
+    // Ensure hicolor is always at the end as fallback
+    if !("hicolor" in visited) {
+        append(&chain, strings.clone("hicolor"))
+    }
+
+    return chain
+}
+
+// Resolve an icon name to an absolute PNG path
+resolve_icon_path :: proc(icon_name: string, config: ^Icon_Config) -> string {
+    if len(icon_name) == 0 do return ""
+
+    // If icon_name is already an absolute path
+    if icon_name[0] == '/' {
+        if os.exists(icon_name) && strings.has_suffix(icon_name, ".png") {
+            return strings.clone(icon_name)
+        }
+        // Try adding .png extension
+        png_path := strings.concatenate({icon_name, ".png"})
+        if os.exists(png_path) {
+            return png_path
+        }
+        delete(png_path)
+        return ""
+    }
+
+    // Icon sizes to search (prefer 32, then larger, then smaller)
+    sizes := [?]string{"32x32", "48x48", "24x24", "64x64", "16x16", "scalable"}
+
+    // Search through theme chain
+    for theme in config.theme_chain {
+        for base_dir in config.theme_dirs {
+            for size in sizes {
+                // Standard path: {base_dir}/{theme}/{size}/apps/{icon_name}.png
+                path := strings.concatenate({base_dir, "/", theme, "/", size, "/apps/", icon_name, ".png"})
+                if os.exists(path) {
+                    return path
+                }
+                delete(path)
+            }
+        }
+    }
+
+    // Fallback: check /usr/share/pixmaps
+    pixmaps_path := strings.concatenate({"/usr/share/pixmaps/", icon_name, ".png"})
+    if os.exists(pixmaps_path) {
+        return pixmaps_path
+    }
+    delete(pixmaps_path)
+
+    return ""
+}
+
+// Create a simple placeholder icon procedurally
+create_placeholder_icon :: proc() -> rl.Texture2D {
+    size :: ICON_SIZE
+
+    // Create gray background
+    img := rl.GenImageColor(size, size, {60, 60, 70, 255})
+
+    // Draw a simple window-like shape
+    rl.ImageDrawRectangle(&img, 4, 4, size - 8, 3, {100, 100, 120, 255})  // Title bar
+    rl.ImageDrawRectangle(&img, 4, 8, size - 8, size - 12, {80, 80, 95, 255})  // Window body
+
+    tex := rl.LoadTextureFromImage(img)
+    rl.UnloadImage(img)
+
+    return tex
+}
+
+// Load icon for an app entry (lazy loading)
+load_app_icon :: proc(app: ^App_Entry, config: ^Icon_Config, placeholder: rl.Texture2D) {
+    if app.icon_loaded do return
+    app.icon_loaded = true
+
+    if len(app.icon_name) == 0 {
+        app.texture = placeholder
+        return
+    }
+
+    // Resolve path if not already done
+    if len(app.icon_path) == 0 {
+        app.icon_path = resolve_icon_path(app.icon_name, config)
+    }
+
+    if len(app.icon_path) == 0 {
+        app.texture = placeholder
+        return
+    }
+
+    // Load texture via Raylib
+    cpath := strings.clone_to_cstring(app.icon_path)
+    defer delete(cpath)
+
+    tex := rl.LoadTexture(cpath)
+    if tex.id == 0 {
+        app.texture = placeholder
+        return
+    }
+
+    app.texture = tex
 }
